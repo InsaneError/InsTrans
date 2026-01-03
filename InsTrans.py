@@ -74,7 +74,7 @@ class InsTrans(loader.Module):
 
     @loader.command()
     async def t(self, message):
-        """[язык?] [текст/реплай] - перевод с удалением команды"""
+        """[язык?] [текст/реплай] - перевод"""
         try:
             args = utils.get_args_raw(message)
             reply = await message.get_reply_message()
@@ -141,7 +141,7 @@ class InsTrans(loader.Module):
             pass
 
     @loader.command()
-    async def tlang(self, message):
+    async def tl(self, message):
         """[язык] - установить язык по умолчанию"""
         args = utils.get_args_raw(message)
         
