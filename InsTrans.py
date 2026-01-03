@@ -3,10 +3,11 @@ from asyncio import sleep, create_task
 from .. import loader, utils
 import aiohttp
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 @loader.tds
 class InsTrans(loader.Module):
-    """Переводчик от @InsModule"""
     strings = {
         'name': 'InsTrans',
         'no_text': 'Нет текста для перевода',
@@ -33,11 +34,24 @@ class InsTrans(loader.Module):
             'PT': 'pt', 'KO': 'ko', 'TR': 'tr', 'PL': 'pl', 'NL': 'nl',
             'HI': 'hi', 'ID': 'id', 'VI': 'vi', 'TH': 'th'
         }
+        self._semaphore = asyncio.Semaphore(3)
+        self._session_timeout = aiohttp.ClientTimeout(
+            total=10,
+            connect=5,
+            sock_read=7
+        )
 
     async def client_ready(self, client, db):
         self._client = client
         self._db = db
-        self.session = aiohttp.ClientSession()
+        self.session = aiohttp.ClientSession(
+            timeout=self._session_timeout,
+            connector=aiohttp.TCPConnector(
+                limit=20,
+                ttl_dns_cache=300,
+                use_dns_cache=True
+            )
+        )
         if self.config["DEFAULT_LANG"].upper() not in self.supported_langs:
             self.config["DEFAULT_LANG"] = "RU"
 
@@ -45,43 +59,68 @@ class InsTrans(loader.Module):
         if self.session:
             await self.session.close()
 
+    async def _make_request(self, url: str, params: dict) -> dict:
+        async with self._semaphore:
+            try:
+                async with self.session.get(
+                    url, 
+                    params=params,
+                    headers={
+                        'Accept': 'application/json',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'User-Agent': 'Mozilla/5.0 (compatible; GoogleTranslate)'
+                    },
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json(content_type=None)
+                    return None
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                return None
+            except Exception:
+                return None
+
     async def translate_text(self, text: str, target_lang: str) -> str:
-        """Функция перевода"""
         if not text or not target_lang:
             return None
+        
+        if len(text.strip()) == 0:
+            return text
             
         try:
+            text_to_translate = text[:4000]
+            
             url = 'https://translate.googleapis.com/translate_a/single'
             params = {
                 'client': 'gtx',
                 'sl': 'auto',
                 'tl': target_lang,
                 'dt': 't',
-                'q': text[:5000]  
+                'q': text_to_translate,
+                'dj': '1'
             }
             
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with self.session.get(url, params=params, timeout=timeout) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data and data[0]:
-                        return ''.join([chunk[0] for chunk in data[0] if chunk[0]])
-                return None
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+            data = await self._make_request(url, params)
+            
+            if data and data.get('sentences'):
+                result_parts = []
+                for sentence in data['sentences']:
+                    if 'trans' in sentence:
+                        result_parts.append(sentence['trans'])
+                return ''.join(result_parts) if result_parts else None
+                
             return None
+            
         except Exception:
             return None
 
     @loader.command()
     async def t(self, message):
-        """[язык?] [текст/реплай] - перевод"""
         try:
             args = utils.get_args_raw(message)
             reply = await message.get_reply_message()
             
-            
-            await message.delete()
-            
+            delete_task = create_task(message.delete())
             
             text = ''
             if reply and (reply.text or reply.caption):
@@ -97,20 +136,18 @@ class InsTrans(loader.Module):
                     if potential_lang in self.supported_langs:
                         target_lang = potential_lang
             
-            
             if args and not reply:
                 parts = args.split(maxsplit=1)
                 if len(parts) > 0 and parts[0].upper() in self.supported_langs:
                     target_lang = parts[0].upper()
                     text = parts[1] if len(parts) > 1 else ''
             
-            
             if not text:
                 error_msg = await utils.answer(message, self.strings('no_text'))
-                await asyncio.sleep(3)
-                await error_msg.delete()
+                delete_error = create_task(error_msg.delete())
+                await asyncio.sleep(2)
+                await delete_error
                 return
-            
             
             lang_code = self.supported_langs.get(target_lang)
             if not lang_code:
@@ -118,19 +155,22 @@ class InsTrans(loader.Module):
                     message, 
                     self.strings('unsupported_lang').format(lang=target_lang)
                 )
-                await asyncio.sleep(3)
-                await error_msg.delete()
+                delete_error = create_task(error_msg.delete())
+                await asyncio.sleep(2)
+                await delete_error
                 return
             
+            translation_task = create_task(self.translate_text(text, lang_code))
+            await delete_task
             
-            result = await self.translate_text(text, lang_code)
+            result = await translation_task
             
             if not result:
                 error_msg = await utils.answer(message, self.strings('error'))
-                await asyncio.sleep(3)
-                await error_msg.delete()
+                delete_error = create_task(error_msg.delete())
+                await asyncio.sleep(2)
+                await delete_error
                 return
-            
             
             await message.reply(
                 f"{result}",
@@ -142,7 +182,6 @@ class InsTrans(loader.Module):
 
     @loader.command()
     async def tl(self, message):
-        """[язык] - установить язык по умолчанию"""
         args = utils.get_args_raw(message)
         
         if not args:
