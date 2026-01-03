@@ -3,8 +3,6 @@ from asyncio import sleep, create_task
 from .. import loader, utils
 import aiohttp
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import time
 
 @loader.tds
 class InsTrans(loader.Module):
@@ -124,6 +122,8 @@ class InsTrans(loader.Module):
             delete_task = create_task(message.delete())
             
             text = ''
+            source_message = reply if reply else None
+            
             if reply and (reply.text or reply.caption):
                 text = reply.text or reply.caption
             
@@ -167,19 +167,22 @@ class InsTrans(loader.Module):
             result = await translation_task
             
             if not result:
-                error_msg = await utils.answer(message, self.strings('error'))
-                delete_error = create_task(error_msg.delete())
-                await asyncio.sleep(2)
-                await delete_error
                 return
             
-            await message.reply(
-                f"{result}",
-                parse_mode='html'
-            )
+            if source_message:
+                await source_message.reply(
+                    result,
+                    parse_mode='html'
+                )
+            else:
+                await self._client.send_message(
+                    message.peer_id,
+                    result,
+                    parse_mode='html'
+                )
             
-        except Exception as e:
-            pass
+        except Exception:
+            return
 
     @loader.command()
     async def tl(self, message):
